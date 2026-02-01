@@ -29,36 +29,31 @@ class Topology(BaseModel):
 async def analyze_system(data: Topology):
     findings = []
     node_types = {n.id: n.type for n in data.nodes}
-    node_domains = {n.id: n.domain for n in data.nodes}
+    inventory = [n.type for n in data.nodes]
     
-    # 1. TOPOLOGY RULES (Path-based)
-    for edge in data.edges:
-        src_dom = node_domains.get(edge.from_node)
-        tgt_dom = node_domains.get(edge.to_node)
-        
-        # Rule: Source to Distribution needs Protection
-        if src_dom == "Source" and tgt_dom == "Distribution":
-            findings.append({
-                "issue": "Protection Gap",
-                "detail": f"Unfused path from {edge.from_node} to {edge.to_node}."
-            })
-            
-        # Rule: Source to Distribution needs Isolation (Switch)
-        if src_dom == "Source" and tgt_dom == "Distribution":
-             findings.append({
-                "issue": "Isolation Missing",
-                "detail": f"No battery switch detected between {edge.from_node} and {edge.to_node}."
-            })
-
-    # 2. INVENTORY RULES (System-wide)
-    has_alt = any(n.type == "ALT" for n in data.nodes)
-    has_bat = any(n.type == "BAT" for n in data.nodes)
-    has_apd = any(n.type == "APD" for n in data.nodes)
-
-    if has_alt and has_bat and not has_apd:
+    # RULE 1: Split-Phase Requirement
+    quattro_count = inventory.count("QUATTRO")
+    if 0 < quattro_count < 2:
         findings.append({
-            "issue": "E-13 Violation",
-            "detail": "Alternator present with Lithium battery requires an APD (Alternator Protection Device)."
+            "issue": "Phase Mismatch",
+            "detail": "System detected only one Quattro. Your 120/240V split-phase architecture requires two units."
         })
-            
+
+    # RULE 2: Coordination Requirement
+    if "QUATTRO" in inventory and "CERBO" not in inventory:
+        findings.append({
+            "issue": "Missing Controller",
+            "detail": "Cerbo GX is required to coordinate dual-Quattro split-phase timing and DVCC."
+        })
+
+    # RULE 3: 48V LFP Protection (The "7-inch" / AIC Rule)
+    for edge in data.edges:
+        u_type = node_types.get(edge.from_node)
+        v_type = node_types.get(edge.to_node)
+        if u_type == "LFP_48" and v_type != "CLASS_T":
+            findings.append({
+                "issue": "Extreme AIC Risk",
+                "detail": f"48V LFP ({edge.from_node}) must lead directly to a Class-T fuse to safely interrupt a short circuit."
+            })
+
     return {"findings": findings}
