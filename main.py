@@ -1,59 +1,42 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List
+from typing import List, Dict
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], 
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-class Node(BaseModel):
-    id: str
-    type: str
-    domain: str
-
-class Edge(BaseModel):
-    from_node: str 
-    to_node: str
+# THE DATABASE: This is where we will eventually list every Victron/Blue Sea part.
+LIBRARY = {
+    "LFP_48": {"name": "WattCycle 48V 100Ah", "v": 48, "type": "batt", "chem": "LFP"},
+    "CLASS_T": {"name": "Blue Sea Class-T Fuse", "v": 125, "type": "fuse", "aic": 20000},
+    "QUATTRO": {"name": "Victron Quattro 5kVA", "v": 48, "type": "inv", "split": True},
+    "CERBO": {"name": "Victron Cerbo GX", "type": "ctrl"},
+    "SHUNT": {"name": "Victron SmartShunt", "type": "sensor"}
+}
 
 class Topology(BaseModel):
-    nodes: List[Node]
-    edges: List[Edge]
+    nodes: List[Dict]
+    edges: List[Dict]
 
 @app.post("/analyze")
 async def analyze_system(data: Topology):
     findings = []
-    node_types = {n.id: n.type for n in data.nodes}
-    inventory = [n.type for n in data.nodes]
+    # Map nodes to their library data
+    active_gear = [LIBRARY.get(n['type'], {"name": "Unknown"}) for n in data.nodes]
     
-    # RULE 1: Split-Phase Requirement
-    quattro_count = inventory.count("QUATTRO")
-    if 0 < quattro_count < 2:
-        findings.append({
-            "issue": "Phase Mismatch",
-            "detail": "System detected only one Quattro. Your 120/240V split-phase architecture requires two units."
-        })
+    # RULE: Voltage Matching
+    v_levels = {g['v'] for g in active_gear if 'v' in g}
+    if len(v_levels) > 1:
+        findings.append({"issue": "Voltage Mismatch", "detail": f"Detected multiple voltages ({v_levels}V) on the same DC path."})
 
-    # RULE 2: Coordination Requirement
-    if "QUATTRO" in inventory and "CERBO" not in inventory:
-        findings.append({
-            "issue": "Missing Controller",
-            "detail": "Cerbo GX is required to coordinate dual-Quattro split-phase timing and DVCC."
-        })
+    # RULE: LFP Safety (AIC)
+    for i in range(len(data.nodes) - 1):
+        if active_gear[i].get('chem') == 'LFP' and active_gear[i+1].get('type') != 'fuse':
+            findings.append({"issue": "AIC Hazard", "detail": "Lithium batteries must lead directly to a High-AIC fuse (Class-T)."})
 
-    # RULE 3: 48V LFP Protection (The "7-inch" / AIC Rule)
-    for edge in data.edges:
-        u_type = node_types.get(edge.from_node)
-        v_type = node_types.get(edge.to_node)
-        if u_type == "LFP_48" and v_type != "CLASS_T":
-            findings.append({
-                "issue": "Extreme AIC Risk",
-                "detail": f"48V LFP ({edge.from_node}) must lead directly to a Class-T fuse to safely interrupt a short circuit."
-            })
+    # RULE: Split-Phase Inventory
+    if any(g.get('split') for g in active_gear) and active_gear.count(LIBRARY['QUATTRO']) < 2:
+        findings.append({"issue": "Phase Error", "detail": "240V Split-Phase requires two synchronized Inverters."})
 
     return {"findings": findings}
